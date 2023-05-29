@@ -7,6 +7,10 @@ from quant import *
 from sparsegpt import *
 from modelutils import *
 
+from transformers import AutoConfig, AutoModel
+
+from utils.misc import progress_bar
+
 try:
     import wandb
     has_wandb = True
@@ -14,17 +18,25 @@ except:
     has_wandb = False 
 
 
-def get_opt(model):
+def get_opt(model, seqlen=-1):
     import torch
     def skip(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
+    # if is_test_mode:
+    #     config = AutoConfig.from_pretrained(model)
+    #     model = AutoModel.from_config(config)
+    # else:
     from transformers import OPTForCausalLM
     model = OPTForCausalLM.from_pretrained(model, torch_dtype='auto')
-    model.seqlen = model.config.max_position_embeddings
+    if seqlen == -1:
+        model.seqlen = model.config.max_position_embeddings
+    else:
+        model.seqlen = seqlen
     return model
+
 
 @torch.no_grad()
 def opt_sequential(model, dataloader, dev):
@@ -127,12 +139,14 @@ def opt_sequential(model, dataloader, dev):
 
     model.config.use_cache = use_cache
 
+
 @torch.no_grad()
 def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
     print('Evaluating ...')
 
     testenc = testenc.input_ids
     nsamples = testenc.numel() // model.seqlen
+    print('Evaluate {} samples with length: {}'.format(nsamples, model.seqlen))
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -153,20 +167,24 @@ def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
     cache = {'i': 0, 'attention_mask': None}
 
     class Catcher(nn.Module):
+
         def __init__(self, module):
             super().__init__()
             self.module = module
+
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             raise ValueError
+
     layers[0] = Catcher(layers[0])
     for i in range(nsamples):
         batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
         try:
             model(batch)
         except ValueError:
+            # print('Something wrong.')
             pass
     layers[0] = layers[0].module
 
@@ -183,16 +201,16 @@ def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
     attention_mask = cache['attention_mask']
 
     for i in range(len(layers)):
-        print(i)
+        print("Cache layer {}".format(i))
         layer = layers[i].to(dev)
-
+        # """
         if args.gmp:
             subset = find_layers(layer)
             for name in subset:
                 W = subset[name].weight.data
                 thresh = torch.sort(torch.abs(W.flatten()))[0][int(W.numel() * args.sparsity)]
                 W.data[torch.abs(W.data) <= thresh] = 0
-
+        # """
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
         layers[i] = layer.cpu()
@@ -223,6 +241,7 @@ def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
+        progress_bar(i, nsamples, "nnl: {}".format(neg_log_likelihood))
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(f"Perplexity: {ppl.item():3f}")
     if log_wandb:
@@ -238,11 +257,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        'model', type=str, 
+        '--model', type=str, default="facebook/opt-125m",
         help='OPT model to load; pass `facebook/opt-X`.'
     )
     parser.add_argument(
-        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
+        '--dataset', type=str, choices=['wikitext2', 'ptb', 'c4'], default="ptb",
         help='Where to extract calibration data from.'
     )
     parser.add_argument(
@@ -252,6 +271,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--nsamples', type=int, default=128,
         help='Number of calibration data samples.'
+    )
+    parser.add_argument(
+        '--seqlen', '-seq', type=int, default=-1,
+        help=''
     )
     parser.add_argument(
         '--percdamp', type=float, default=.01,
@@ -305,6 +328,10 @@ if __name__ == '__main__':
        '--log_wandb', action='store_true',
        help='Whether to log to wandb.'
     )
+    parser.add_argument(
+       '--test', action='store_true',
+       help='Test mode.'
+    )
 
     args = parser.parse_args()
 
@@ -313,7 +340,7 @@ if __name__ == '__main__':
         assert has_wandb, "wandb not installed try `pip install wandb`"
         wandb.init(config=args)
 
-    model = get_opt(args.model)
+    model = get_opt(args.model, seqlen=args.seqlen)
     model.eval()
 
     dataloader, testloader = get_loaders(
@@ -329,7 +356,8 @@ if __name__ == '__main__':
                 break
         print(time.time() - tick)
 
-    for dataset in ['wikitext2', 'ptb', 'c4']:
+    # for dataset in ['wikitext2', 'ptb', 'c4']:
+    for dataset in ['ptb']:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )

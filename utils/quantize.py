@@ -55,4 +55,5 @@ def vector_wise_absmax_quantize(_x, _bit, _vector_index):
     scale_x = _shift_x / _scaling_factor # [left-mid, right-mid] => [-1, 1]
     _scale_quantized_x, _quantized_bit = Function_STE.apply(scale_x, _bit) # [-1, 1] => {-1, 1}
     _quantized_x = _scale_quantized_x * _scaling_factor + mid
-    return _quantized_x, _quantized_bit # , _scaling_factor, mid
+    # return _quantized_x, _quantized_bit # , _scaling_factor, mid
+    return _quantized_x, None

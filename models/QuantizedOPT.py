@@ -1,7 +1,7 @@
 import os
 import torch.nn as nn
 
-from transformers.models.opt.modeling_opt import OPTForCausalLM, OPTModel, OPTDecoder, OPTLearnedPositionalEmbedding, OPTAttention
+from transformers.models.opt.modeling_opt import OPTForCausalLM, OPTModel, OPTDecoder, OPTLearnedPositionalEmbedding, OPTAttention, OPTDecoderLayer
 from transformers.models.opt.modeling_opt import ACT2FN
 
 from models.module import quantized_Linear
@@ -47,9 +47,10 @@ class QuantizedOPTAttention(OPTAttention):
         self.out_proj = quantized_Linear(embed_dim, embed_dim, bias=bias, bitW=bitW, bitA=bitA, vector_index=vector_index)
 
 
-class QuantizedOPTDecoderLayer(nn.Module):
+class QuantizedOPTDecoderLayer(OPTDecoderLayer):
+
     def __init__(self, config):
-        super().__init__()
+        super().__init__(config)
         self.embed_dim = config.hidden_size
         self.self_attn = QuantizedOPTAttention(
             embed_dim=self.embed_dim,
@@ -93,7 +94,10 @@ class QuantizedOPTDecoder(OPTDecoder):
             self.project_out = None
 
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_in = nn.Linear(config.word_embed_proj_dim, config.hidden_size, bias=False)
+            self.project_in = quantized_Linear(
+                config.word_embed_proj_dim, config.hidden_size, bias=False,
+                bitW=config.bitW, bitA=config.bitA, vector_index=config.vector_index
+            )
         else:
             self.project_in = None
 
@@ -127,13 +131,13 @@ class QuantizedOPTForCausalLM(OPTForCausalLM):
 
     def __init__(self, config):
         super().__init__(config)
-        config.bitW = 8
-        config.bitA = 8
-        config.vector_index = [0, 1]
         self.model = QuantizedOPTModel(config)
 
         # the lm_head weight is automatically tied to the embed tokens weight
-        self.lm_head = nn.Linear(config.word_embed_proj_dim, config.vocab_size, bias=False)
+        self.lm_head = quantized_Linear(
+            config.word_embed_proj_dim, config.vocab_size, bias=False,
+            bitW=config.bitW, bitA=config.bitA, vector_index=config.vector_index
+        )
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -151,6 +155,11 @@ if __name__ == '__main__':
     config.bitA = 8
     config.vector_index = [0, 1]
     model = QuantizedOPTForCausalLM(config)
+
+    batch_size = 10
+    seq_len = 10
+    inputs = torch.randint(high = 10, size=[batch_size, seq_len])
+    outputs = model(inputs)
     # """
     """
     model = QuantizedOPTForCausalLM.from_pretrained(model_name, torch_dtype='auto')

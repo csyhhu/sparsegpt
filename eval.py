@@ -20,6 +20,10 @@ parser.add_argument(
     help='Where to extract calibration data from.'
 )
 parser.add_argument(
+    '--bitW', '-bw', type=int, default=8,
+    help=''
+)
+parser.add_argument(
     '--n-samples', '-ns', type=int, default=-1,
     help=''
 )
@@ -60,11 +64,14 @@ def get_model(model_name, is_test=False, use_INT8=False, use_default_INT8=False,
             )
         elif use_INT8:
             config = AutoConfig.from_pretrained(model_name)
-            config.bitW = 8
+            config.bitW = kwargs.get('bitW', 8)
             config.bitA = 32
             config.vector_index = [0, 1]
             model = QuantizedOPTForCausalLM(config)
-            model.load_state_dict()
+            pretrain_path = "./ckpt/{}.pt".format(model_name.replace('/', '-'))
+            print('Load pretrain state dict from: {}'.format(pretrain_path))
+            model.load_state_dict(torch.load(pretrain_path))
+            model.to(device)
         else:
             model = OPTForCausalLM.from_pretrained(
                 model_name,
@@ -88,8 +95,10 @@ if __name__ == '__main__':
     seqlen = args.seq_length
     is_test = args.is_test
     use_INT8 = args.use_INT8
+    use_default_INT8 = args.use_default_INT8
+    bitW = args.bitW
 
-    model = get_model(model_name, is_test, use_INT8, device=dev)
+    model = get_model(model_name, is_test, use_INT8, use_default_INT8, device=dev, bitW=args.bitW)
     seqlen = model.config.max_position_embeddings if seqlen == -1 else seqlen
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
